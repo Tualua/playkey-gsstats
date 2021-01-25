@@ -1,69 +1,50 @@
 #!/usr/bin/python
-import geoip2.database
-import xml.etree.ElementTree as ET
-import subprocess
+from pygsstats import *
+from pandas import DataFrame
+import platform
+import argparse
+from datetime import datetime as dt
+from datetime import timedelta
 
 
-# Read VM names from GameServer config
-def get_servers(path="/usr/local/etc/gameserver/conf.xml"):
-    tree = ET.parse(path)
-    root = tree.getroot()
-    vms = []
-    for server in root.iter('Server'):
-        vms.append(server.get('name'))
-    return vms
+
+def get_demand_data(log):
+    connections = find_all(PYGSS['CLIENT_ADDRESS'], log)
+    data = []
+    for conn in connections:
+        start_pos = conn+len(PYGSS['CLIENT_ADDRESS'])+1
+        end_pos = log.find(':', start_pos)
+        ipaddr = log[start_pos:end_pos]
+        loc = get_location(ipaddr)
+        if loc:
+            data.append(loc)
+    return DataFrame(data)
 
 
-# Wrapper for shell command excecution
-def exec_shell_command(command):
-    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
-    stdout, stderr = proc.communicate()
-    return stdout.split('\n')
+def main(args):
+    host_name = platform.node().split('.', 1)[0]
+    now_time = dt.now()
+    td = 0
+    if args.day:
+        td = args.day
+
+    start_time = (now_time-timedelta(days=td)).strftime('%Y-%m-%d 00:00:00')
+    end_time = (now_time-timedelta(days=td)).strftime('%Y-%m-%d 23:59:59')
+
+    logdir = ''
+    if args.logdir:
+        logdir = args.logdir
+    
+    log = get_log_all(start_time, end_time, split=False, debug=args.debug, logdir=logdir)
+    df = get_demand_data(log)
+    df.groupby(['Region']).size().sort_values(ascending=False).to_excel("{}.xlsx".format(host_name))
+    df.loc[df['Region'] == "Krasnoyarskiy Kray"].to_excel("{}-Krasnoyarsk.xlsx".format(host_name))
 
 
-# Read GameServer log for <vm> for <start>-<end> timeframe.
-def get_log(domainName, start, end, reverse=False, debug=False, logdir=''):
-    jctl_options = ["-o short-iso"]
-    jctl_options.append("--no-pager -tgameserver/{}".format(domainName))
-
-    if start:
-        jctl_options.append("--since=\"{}\"".format(start))
-    if end:
-        jctl_options.append("--until=\"{}\"".format(end))
-    if reverse:
-        jctl_options.append("-r")
-    if logdir:
-        jctl_options.append("--directory {}".format(logdir))
-
-    jctl = "journalctl {}".format(" ".join(jctl_options))
-    if debug:
-        print('Get journal: {}'.format(jctl))
-    data = exec_shell_command(jctl)
-
-    return data
-
-
-# Get IP address location info using MaxMind databases
-def get_location(ipaddress):
-    reader = geoip2.database.Reader('/usr/share/GeoIP/GeoLite2-City.mmdb')
-    readerasn = geoip2.database.Reader('/usr/share/GeoIP/GeoLite2-ASN.mmdb')
-    result = {}
-    try:
-        location = reader.city(ipaddress)
-        result["Continent"] = location.continent.name.encode('ascii', 'replace')
-        result["Country"] = location.country.name.encode('ascii', 'replace')
-        result["Region"] = location.subdivisions.most_specific.name.encode('ascii', 'replace')
-        result["City"] = location.city.name.encode('ascii', 'replace')
-        result["Latitude"] = float(location.location.latitude)
-        result["Longitude"] = float(location.location.longitude)
-        asn = readerasn.asn(ipaddress)
-        result["ASN"] = "AS{}".format(asn.autonomous_system_number)
-        result["ASN Provider"] = asn.autonomous_system_organization.encode('ascii', 'replace')
-    except geoip2.errors.AddressNotFoundError:
-        pass
-    except AttributeError:
-        pass
-    reader.close()
-    readerasn.close()
-    return result
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='PlayKey GameServer demand analyzer')
+    parser.add_argument('--day', type=int, action='store', dest="day", help='Which day to parse')
+    parser.add_argument('--logdir', type=str, action='store', dest="logdir", help='Path to journal log dir')
+    parser.add_argument('--debug', help='Print additional info during run', action='store_true', default=False)
+    args = parser.parse_args()
+    main(args)
